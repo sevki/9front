@@ -35,8 +35,7 @@ Cursor pausecursor={
 
 enum {
 	STK = 8192,
-	MOVE = 0,
-	ZOOM,
+	ZOOM = 0,
 	SPEED,
 	GRAV,
 	SAVE,
@@ -57,7 +56,7 @@ double
 	LIM = 10,
 	dt²;
 char *file;
-int showv, showa, throttle, paused;
+int showv, showa, throttle;
 
 char *menustr[] = {
 	[SAVE]	"save",
@@ -65,7 +64,6 @@ char *menustr[] = {
 	[ZOOM]	"zoom",
 	[SPEED]	"speed",
 	[GRAV]	"gravity",
-	[MOVE]	"move",
 	[EXIT]	"exit",
 	[MEND]	nil
 };
@@ -106,26 +104,28 @@ randcol(void)
 }
 
 void
-pause(int p, int pri)
+pause(int p, int id)
 {
-	static int paused, ppri;
+	static int paused, pid = -1;
 
 	switch(p) {
 	default:
 		sysfatal("invalid pause value %d:", p);
 		break;
 	case 0:
-		if(pri > ppri)
-			ppri = pri;
+		if(pid != -1 && pid != id)
+			break;
+		pid = id;
 		if(paused)
 			break;
 		paused = 1;
 		qlock(&glxy);
 		break;
 	case 1:
-		if(!paused || pri < ppri)
+		if(!paused || pid != id)
 			break;
-		paused = ppri = 0;
+		pid = -1;
+		paused = 0;
 		qunlock(&glxy);
 		break;
 	}
@@ -311,29 +311,24 @@ getinput(char *info, char *sug)
 }
 
 void
-move(void)
+domove(void)
 {
-	Point od;
+	Point oldp, off;
+
 	setcursor(mc, &crosscursor);
+	pause(0, 0);
+	oldp = mc->xy;
 	for(;;) {
-		for(;;) {
-			readmouse(mc);
-			if(mc->buttons & 1)
-				break;
-			if(mc->buttons & 4) {
-				setcursor(mc, cursor);
-				return;
-			}
-		}
-		od = subpt(orig, mc->xy);
-		for(;;) {
-			readmouse(mc);
-			if(!(mc->buttons & 1))
-				break;
-			orig = addpt(od, mc->xy);
-			drawglxy();
-		}
+		readmouse(mc);
+		if(mc->buttons != 2)
+			break;
+		off = subpt(mc->xy, oldp);
+		oldp = mc->xy;
+		orig = addpt(orig, off);
+		drawglxy();
 	}
+	setcursor(mc, cursor);
+	pause(1, 0);
 }
 
 void
@@ -409,9 +404,6 @@ domenu(void)
 			break;
 		G *= z;
 		break;
-	case MOVE:
-		move();
-		break;
 	case EXIT:
 		threadexitsall(nil);
 		break;
@@ -429,6 +421,9 @@ mousethread(void*)
 		switch(mc->buttons) {
 		case 1:
 			dobody();
+			break;
+		case 2:
+			domove();
 			break;
 		case 4:
 			domenu();
@@ -456,9 +451,11 @@ kbdthread(void*)
 {
 	Keyboardctl *realkc;
 	Rune r;
+	static int paused;
 
 	threadsetname("keyboard");
-	if(realkc = initkeyboard(nil), realkc == nil)
+	realkc = initkeyboard(nil);
+	if(realkc == nil)
 		sysfatal("kbdthread: could not initkeyboard: %r");
 
 	for(;;) {
@@ -529,7 +526,7 @@ Again:
 			b->a.y = b->newa.y;
 			b->newa.x = b->newa.y = 0;
 			STATS(calcs = 0;)
-			quadcalc(space, b, LIM);
+			quadcalc(b, space, LIM);
 			STATS(avgcalcs += calcs;)
 		}
 		STATS(avgcalcs /= glxy.l;)
