@@ -15,9 +15,12 @@ struct Avltree {
 	Avl *root;
 };
 
-Avltree *avlcreate(int(*cmp)(Avl*, Avl*));
-Avl *avllookup(Avltree*, Avl*);
+Avltree *avlinit(Avltree*, int(*)(Avl*, Avl*));
+Avltree *avlcreate(int(*)(Avl*, Avl*));
+Avl *avllookup(Avltree*, Avl*, int);
 Avl *avldelete(Avltree*, Avl*);
 Avl *avlinsert(Avltree*, Avl*);
+Avl *avlmin(Avltree*);
+Avl *avlmax(Avltree*);
 Avl *avlnext(Avl*);
 Avl *avlprev(Avl*);

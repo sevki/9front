@@ -4,10 +4,6 @@
 
 /* See Knuth Volume 3, 6.2.3 */
 
-Avl *avllookup(Avltree*, Avl*);
-Avl *avldelete(Avltree*, Avl*);
-Avl *avlinsert(Avltree*, Avl*);
-
 Avltree*
 avlcreate(int (*cmp)(Avl*, Avl*))
 {
@@ -16,32 +12,42 @@ avlcreate(int (*cmp)(Avl*, Avl*))
 	t = malloc(sizeof(*t));
 	if(t == nil)
 		return nil;
+	return avlinit(t, cmp);
+}
 
+Avltree*
+avlinit(Avltree *t, int (*cmp)(Avl*, Avl*))
+{
 	t->cmp = cmp;
 	t->root = nil;
 	return t;
 }
 
 Avl*
-avllookup(Avltree *t, Avl *k)
+avllookup(Avltree *t, Avl *k, int d)
 {
-	Avl *h;
+	Avl *h, *n;
 	int c;
 
+	n = nil;
 	h = t->root;
 	while(h != nil){
 		c = (t->cmp)(k, h);
 		if(c < 0){
+			if(d > 0)
+				n = h;
 			h = h->c[0];
 			continue;
 		}
 		if(c > 0){
+			if(d < 0)
+				n = h;
 			h = h->c[1];
 			continue;
 		}
 		return h;
 	}
-	return nil;
+	return n;
 }
 
 static int insert(int (*)(Avl*, Avl*), Avl*, Avl**, Avl*, Avl**);
@@ -303,4 +309,33 @@ walk1(int a, Avl *q)
 	for(p = q->p; p != nil && p->c[a] == q; p = p->p)
 		q = p;
 	return p;
+}
+
+static Avl *bottom(Avltree*,int);
+
+Avl*
+avlmin(Avltree *t)
+{
+	return bottom(t, 0);
+}
+
+Avl*
+avlmax(Avltree *t)
+{
+	return bottom(t, 1);
+}
+
+static Avl*
+bottom(Avltree *t, int d)
+{
+	Avl *n;
+
+	if(t == nil)
+		return nil;
+	if(t->root == nil)
+		return nil;
+
+	for(n = t->root; n->c[d] != nil; n = n->c[d])
+		;
+	return n;
 }
