@@ -140,8 +140,17 @@ Run the
 .I command
 with the whole message as standard input.
 .TP
+.BI ! command
+Escape to the shell to do command.
+.TP
 \fB"\fP
 Print the current message in quoted form, suitable for reply.
+.PP
+The environment variables
+.B $editor
+and
+.B $pager
+are honored.
 .SH FILES
 .B $home/lib/newsgroups
 list of newsgroups, one per line
