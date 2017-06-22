@@ -226,6 +226,7 @@ struct VmMem {
 	uvlong lo, hi;
 	Segment *seg;
 	uintptr off;
+	char *name;
 	VmMem *next, *prev;
 	u16int attr;
 };
@@ -656,7 +657,10 @@ cmdgetmeminfo(VmCmd *, va_list va)
 		*(ushort*)mt = *(u16int*)mtype[mp->attr >> 3 & 7];
 		mt[2] = (mp->attr & 0x40) != 0 ? '!' : 0;
 		mt[3] = 0;
-		p = seprint(p, e, "%s %s %#llux %#llux %p %#llux\n", attr, mt, mp->lo, mp->hi, mp->seg, (uvlong)mp->off);
+		if(mp->name == nil)
+			p = seprint(p, e, "%s %s %#llux %#llux\n", attr, mt, mp->lo, mp->hi);
+		else
+			p = seprint(p, e, "%s %s %#llux %#llux %s %#llux\n", attr, mt, mp->lo, mp->hi, mp->name, (uvlong)mp->off);
 	}
 	return p - p0;
 }
@@ -668,6 +672,8 @@ cmdclearmeminfo(VmCmd *, va_list)
 
 	eptfree(vmx.pml4, 0);
 	for(mp = vmx.mem.next; mp != &vmx.mem; mp = mn){
+		free(mp->name);
+		putseg(mp->seg);
 		mn = mp->next;
 		free(mp);
 	}
@@ -697,9 +703,15 @@ cmdsetmeminfo(VmCmd *, va_list va)
 		q = strchr(p, '\n');
 		if(q == 0) break;
 		*q = 0;
-		if(mp == nil)
+		if(mp == nil){
 			mp = malloc(sizeof(VmMem));
+			if(mp == nil)
+				error(Enomem);
+		}
+		memset(mp, 0, sizeof(VmMem));
 		if(waserror()){
+			putseg(mp->seg);
+			free(mp->name);
 			free(mp);
 			nexterror();
 		}
@@ -707,7 +719,6 @@ cmdsetmeminfo(VmCmd *, va_list va)
 		p = q + 1;
 		if(rc == 0) goto next;
 		if(rc != 4 && rc != 6) error("number of fields wrong");
-		memset(mp, 0, sizeof(VmMem));
 		for(q = f[0]; *q != 0; q++)
 			switch(*q){
 			case 'r': if((mp->attr & 1) != 0) goto tinval; mp->attr |= 1; break;
@@ -735,6 +746,7 @@ cmdsetmeminfo(VmCmd *, va_list va)
 			mp->seg = _globalsegattach(f[4]);
 			if(mp->seg == nil) error("no such segment");
 			if(mp->seg->base + mp->off + (mp->hi - mp->lo) > mp->seg->top) error("out of bounds");
+			kstrdup(&mp->name, f[4]);
 		}
 		epttranslate(mp);
 		mp->prev = vmx.mem.prev;
@@ -1433,6 +1445,18 @@ cmdirq(VmCmd *, va_list va)
 	return 0;
 }
 
+static int
+cmdextrap(VmCmd *, va_list va)
+{
+	char *p, *q;
+	u32int v;
+	
+	p = va_arg(va, char *);
+	v = strtoul(p, &q, 0);
+	if(q == p || *q != 0) error(Ebadarg);
+	vmcswrite(EXC_BITMAP, v);
+	return 0;
+}
 
 static int
 gotcmd(void *)
@@ -1657,6 +1681,7 @@ enum {
 	CMstep,
 	CMexc,
 	CMirq,
+	CMextrap,
 };
 
 static Cmdtab vmxctlmsg[] = {
@@ -1667,6 +1692,7 @@ static Cmdtab vmxctlmsg[] = {
 	CMstep,		"step",		0,
 	CMexc,		"exc",		2,
 	CMirq,		"irq",		0,
+	CMextrap,	"extrap",	2,
 };
 
 static int
@@ -1909,6 +1935,18 @@ vmxwrite(Chan* c, void* a, long n, vlong off)
 			poperror();
 			free(s);
 			break;
+		case CMextrap:
+			s = nil;
+			kstrdup(&s, cb->f[1]);
+			if(waserror()){
+				free(s);
+				nexterror();
+			}
+			vmxcmd(cmdextrap, s);
+			poperror();
+			free(s);
+			break;
+
 		default:
 			error(Egreg);
 		}
