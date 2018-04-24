@@ -666,11 +666,9 @@ doadd(int retry)
 	}
 
 	/* leave everything we've learned somewhere other procs can find it */
-	if(beprimary){
-		if(!dondbconfig && !ipv6auto)
-			putndb();
-		refresh();
-	}
+	if(beprimary && !dondbconfig && !ipv6auto)
+		putndb();
+	refresh();
 }
 
 void
@@ -1004,10 +1002,9 @@ dhcpwatch(int needconfig)
 			 * leave everything we've learned somewhere that
 			 * other procs can find it.
 			 */
-			if(beprimary){
+			if(beprimary)
 				putndb();
-				refresh();
-			}
+			refresh();
 		}
 	}
 }
@@ -1715,7 +1712,8 @@ putndb(void)
 			uchar ip[IPaddrlen];
 
 			if((nt = ndbfindattr(t, t, "ip")) == nil
-			|| parseip(ip, nt->val) < 0 || ipcmp(ip, conf.laddr) != 0){
+			|| parseip(ip, nt->val) == -1
+			|| ipcmp(ip, conf.laddr) != 0){
 				p = seprint(p, e, "\n");
 				for(nt = t; nt != nil; nt = nt->entry)
 					p = seprint(p, e, "%s=%s%s", nt->attr, nt->val,
@@ -1776,11 +1774,29 @@ procsetname(char *fmt, ...)
 	free(cmdname);
 }
 
+static Ndbtuple*
+uniquent(Ndbtuple *t)
+{
+	Ndbtuple **l, *x;
+
+	l = &t->entry;
+	while((x = *l) != nil){
+		if(strcmp(t->attr, x->attr) != 0){
+			l = &x->entry;
+			continue;
+		}
+		*l = x->entry;
+		x->entry = nil;
+		ndbfree(x);
+	}
+	return t;
+}
+
 /* get everything out of ndb */
 void
 ndbconfig(void)
 {
-	int nattr, nauth = 0, ndns = 0, nfs = 0, ok;
+	int nattr, nauth = 0, ndns = 0, nfs = 0, nntp = 0, ok;
 	char etheraddr[32];
 	char *attrs[10];
 	Ndb *db;
@@ -1806,20 +1822,20 @@ ndbconfig(void)
 	for(nt = t; nt != nil; nt = nt->entry) {
 		ok = 1;
 		if(strcmp(nt->attr, "ip") == 0)
-			ok = parseip(conf.laddr, nt->val);
+			ok = parseip(conf.laddr, uniquent(nt)->val);
 		else if(strcmp(nt->attr, "ipmask") == 0)
-			parseipmask(conf.mask, nt->val);  /* could be -1 */
+			parseipmask(conf.mask, uniquent(nt)->val);  /* could be -1 */
 		else if(strcmp(nt->attr, "ipgw") == 0)
-			ok = parseip(conf.gaddr, nt->val);
-		else if(ndns < 2 && strcmp(nt->attr, "dns") == 0)
-			ok = parseip(conf.dns+IPaddrlen*ndns, nt->val);
-		else if(strcmp(nt->attr, "ntp") == 0)
-			ok = parseip(conf.ntp, nt->val);
-		else if(nfs < 2 && strcmp(nt->attr, "fs") == 0)
-			ok = parseip(conf.fs+IPaddrlen*nfs, nt->val);
-		else if(nauth < 2 && strcmp(nt->attr, "auth") == 0)
-			ok = parseip(conf.auth+IPaddrlen*nauth, nt->val);
-		if (!ok)
+			ok = parseip(conf.gaddr, uniquent(nt)->val);
+		else if(ndns < sizeof(conf.dns)/IPaddrlen && strcmp(nt->attr, "dns") == 0)
+			ok = parseip(conf.dns+IPaddrlen*ndns++, nt->val);
+		else if(nntp < sizeof(conf.ntp)/IPaddrlen && strcmp(nt->attr, "ntp") == 0)
+			ok = parseip(conf.ntp+IPaddrlen*nntp++, nt->val);
+		else if(nfs < sizeof(conf.fs)/IPaddrlen && strcmp(nt->attr, "fs") == 0)
+			ok = parseip(conf.fs+IPaddrlen*nfs++, nt->val);
+		else if(nauth < sizeof(conf.auth)/IPaddrlen && strcmp(nt->attr, "auth") == 0)
+			ok = parseip(conf.auth+IPaddrlen*nauth++, nt->val);
+		if(ok == -1)
 			fprint(2, "%s: bad %s address in ndb: %s\n", argv0,
 				nt->attr, nt->val);
 	}

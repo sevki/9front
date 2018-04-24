@@ -33,12 +33,12 @@ static void	etherunbind(Ipifc *ifc);
 static void	etherbwrite(Ipifc *ifc, Block *bp, int version, uchar *ip);
 static void	etheraddmulti(Ipifc *ifc, uchar *a, uchar *ia);
 static void	etherremmulti(Ipifc *ifc, uchar *a, uchar *ia);
-static void	etherareg(Fs *f, Ipifc *ifc, uchar *ip, uchar *proxy);
+static void	etherareg(Fs *f, Ipifc *ifc, Iplifc *lifc, uchar *ip);
 static Block*	multicastarp(Fs *f, Arpent *a, Medium*, uchar *mac);
 static void	sendarp(Ipifc *ifc, Arpent *a);
+static void	sendndp(Ipifc *ifc, Arpent *a);
 static int	multicastea(uchar *ea, uchar *ip);
 static void	recvarpproc(void*);
-static void	resolveaddr6(Ipifc *ifc, Arpent *a);
 static void	etherpref2addr(uchar *pref, uchar *ea);
 
 Medium ethermedium =
@@ -219,8 +219,8 @@ etherbind(Ipifc *ifc, int argc, char **argv)
 	poperror();
 
 	kproc("etherread4", etherread4, ifc);
-	kproc("recvarpproc", recvarpproc, ifc);
 	kproc("etherread6", etherread6, ifc);
+	kproc("recvarpproc", recvarpproc, ifc);
 }
 
 /*
@@ -231,27 +231,27 @@ etherunbind(Ipifc *ifc)
 {
 	Etherrock *er = ifc->arg;
 
-	if(er->read4p)
+	if(er->read4p != nil)
 		postnote(er->read4p, 1, "unbind", 0);
-	if(er->read6p)
+	if(er->read6p != nil)
 		postnote(er->read6p, 1, "unbind", 0);
-	if(er->arpp)
+	if(er->arpp != nil)
 		postnote(er->arpp, 1, "unbind", 0);
 
 	/* wait for readers to die */
-	while(er->arpp != 0 || er->read4p != 0 || er->read6p != 0)
+	while(er->arpp != nil || er->read4p != nil || er->read6p != nil)
 		tsleep(&up->sleep, return0, 0, 300);
 
 	if(er->mchan4 != nil)
 		cclose(er->mchan4);
-	if(er->achan != nil)
-		cclose(er->achan);
 	if(er->cchan4 != nil)
 		cclose(er->cchan4);
 	if(er->mchan6 != nil)
 		cclose(er->mchan6);
 	if(er->cchan6 != nil)
 		cclose(er->cchan6);
+	if(er->achan != nil)
+		cclose(er->achan);
 
 	free(er);
 }
@@ -272,13 +272,13 @@ etherbwrite(Ipifc *ifc, Block *bp, int version, uchar *ip)
 	if(a != nil){
 		/* check for broadcast or multicast */
 		bp = multicastarp(er->f, a, ifc->m, mac);
-		if(bp==nil){
+		if(bp == nil){
 			switch(version){
 			case V4:
 				sendarp(ifc, a);
 				break;
 			case V6:
-				resolveaddr6(ifc, a);
+				sendndp(ifc, a);
 				break;
 			default:
 				panic("etherbwrite: version %d", version);
@@ -329,7 +329,7 @@ etherread4(void *a)
 	er = ifc->arg;
 	er->read4p = up;	/* hide identity under a rock for unbind */
 	if(waserror()){
-		er->read4p = 0;
+		er->read4p = nil;
 		pexit("hangup", 1);
 	}
 	for(;;){
@@ -369,7 +369,7 @@ etherread6(void *a)
 	er = ifc->arg;
 	er->read6p = up;	/* hide identity under a rock for unbind */
 	if(waserror()){
-		er->read6p = 0;
+		er->read6p = nil;
 		pexit("hangup", 1);
 	}
 	for(;;){
@@ -492,7 +492,7 @@ sendarp(Ipifc *ifc, Arpent *a)
 }
 
 static void
-resolveaddr6(Ipifc *ifc, Arpent *a)
+sendndp(Ipifc *ifc, Arpent *a)
 {
 	Block *bp;
 	Etherrock *er = ifc->arg;
@@ -511,15 +511,6 @@ resolveaddr6(Ipifc *ifc, Arpent *a)
 		freeblist(bp);
 	}
 
-	/* try to keep it around for a second more */
-	a->ctime = NOW;
-	a->rtime = NOW + ReTransTimer;
-	if(a->rxtsrem <= 0) {
-		arprelease(er->f->arp, a);
-		return;
-	}
-
-	a->rxtsrem--;
 	ndpsendsol(er->f, ifc, a);	/* unlocks arp */
 }
 
@@ -560,7 +551,7 @@ sendgarp(Ipifc *ifc, uchar *ip)
 static void
 recvarp(Ipifc *ifc)
 {
-	int n;
+	int n, forme;
 	Block *ebp, *rbp;
 	Etherarp *e, *r;
 	uchar ip[IPaddrlen];
@@ -571,12 +562,21 @@ recvarp(Ipifc *ifc)
 	if(ebp == nil)
 		return;
 
+	if(!canrlock(ifc)){
+		freeb(ebp);
+		return;
+	}
+
 	e = (Etherarp*)ebp->rp;
 	switch(nhgets(e->op)) {
 	default:
 		break;
 
 	case ARPREPLY:
+		/* make sure not to enter multi/broadcat address */
+		if(e->sha[0] & 1)
+			break;
+
 		/* check for machine using my ip address */
 		v4tov6(ip, e->spa);
 		if(iplocalonifc(ifc, ip) != nil || ipproxyifc(er->f, ifc, ip)){
@@ -587,17 +587,15 @@ recvarp(Ipifc *ifc)
 			}
 		}
 
-		/* make sure we're not entering broadcast addresses */
-		if(ipcmp(ip, ipbroadcast) == 0 || memcmp(e->sha, etherbroadcast, sizeof(e->sha)) == 0){
-			print("arprep: 0x%E/0x%E cannot register broadcast address %I\n",
-				e->s, e->sha, e->spa);
-			break;
-		}
-
-		arpenter(er->f, V4, e->spa, e->sha, sizeof(e->sha), e->tpa, 0);
+		/* refresh what we know about sender */
+		arpenter(er->f, V4, e->spa, e->sha, sizeof(e->sha), e->tpa, ifc, 1);
 		break;
 
 	case ARPREQUEST:
+		/* don't reply to multi/broadcat addresses */
+		if(e->sha[0] & 1)
+			break;
+
 		/* don't answer arps till we know who we are */
 		if(ifc->lifc == nil)
 			break;
@@ -608,23 +606,28 @@ recvarp(Ipifc *ifc)
 			if(memcmp(e->sha, ifc->mac, sizeof(e->sha)) != 0){
 				if(memcmp(eprinted, e->spa, sizeof(e->spa)) != 0){
 					/* print only once */
-					print("arpreq: 0x%E also has ip addr %V\n", e->sha, e->spa);
+					print("arpreq: 0x%E also has ip addr %V\n",
+						e->sha, e->spa);
 					memmove(eprinted, e->spa, sizeof(e->spa));
 				}
+				break;
 			}
 		} else {
 			if(memcmp(e->sha, ifc->mac, sizeof(e->sha)) == 0){
-				print("arpreq: %V also has ether addr %E\n", e->spa, e->sha);
+				print("arpreq: %V also has ether addr %E\n",
+					e->spa, e->sha);
 				break;
 			}
 		}
 
-		/* refresh what we know about sender */
-		arpenter(er->f, V4, e->spa, e->sha, sizeof(e->sha), e->tpa, 1);
-
-		/* answer only requests for our address or systems we're proxying for */
+		/*
+		 * when request is for our address or systems we're proxying for,
+		 * enter senders address into arp table and reply, otherwise just
+		 * refresh the senders address.
+		 */
 		v4tov6(ip, e->tpa);
-		if(iplocalonifc(ifc, ip) == nil && !ipproxyifc(er->f, ifc, ip))
+		forme = iplocalonifc(ifc, ip) != nil || ipproxyifc(er->f, ifc, ip);
+		if(arpenter(er->f, V4, e->spa, e->sha, sizeof(e->sha), e->tpa, ifc, !forme) < 0 || !forme)
 			break;
 
 		n = sizeof(Etherarp);
@@ -647,8 +650,14 @@ recvarp(Ipifc *ifc)
 		memmove(r->s, ifc->mac, sizeof(r->s));
 		rbp->wp += n;
 
+		runlock(ifc);
+		freeb(ebp);
+
 		devtab[er->achan->type]->bwrite(er->achan, rbp, 0);
+		return;
 	}
+
+	runlock(ifc);
 	freeb(ebp);
 }
 
@@ -660,7 +669,7 @@ recvarpproc(void *v)
 
 	er->arpp = up;
 	if(waserror()){
-		er->arpp = 0;
+		er->arpp = nil;
 		pexit("hangup", 1);
 	}
 	for(;;)
@@ -745,12 +754,12 @@ etherpref2addr(uchar *pref, uchar *ea)
 }
 
 static void
-etherareg(Fs *f, Ipifc *ifc, uchar *ip, uchar *proxy)
+etherareg(Fs *f, Ipifc *ifc, Iplifc *lifc, uchar *ip)
 {
 	static char tdad[] = "dad6";
-	uchar mcast[IPaddrlen];
+	uchar a[IPaddrlen];
 
-	if(ipcmp(ip, IPnoaddr) == 0)
+	if(ipcmp(ip, IPnoaddr) == 0 || ipcmp(ip, v4prefix) == 0)
 		return;
 
 	if(isv4(ip)){
@@ -758,16 +767,25 @@ etherareg(Fs *f, Ipifc *ifc, uchar *ip, uchar *proxy)
 		return;
 	}
 
-	if(!iptentative(f, ip)){
-		icmpna(f, proxy, v6allnodesL, ip, ifc->mac, 1<<5);
+	if((lifc->type&Rv4) != 0)
+		return;
+
+	if(!lifc->tentative){
+		icmpna(f, lifc->local, v6allnodesL, ip, ifc->mac, 1<<5);
 		return;
 	}
 
+	if(ipcmp(lifc->local, ip) != 0)
+		return;
+
 	/* temporarily add route for duplicate address detection */
-	ipv62smcast(mcast, ip);
-	addroute(f, mcast, IPallbits, v6Unspecified, IPallbits, ip, Rmulti, ifc, tdad);
-
+	ipv62smcast(a, ip);
+	addroute(f, a, IPallbits, v6Unspecified, IPallbits, ip, Rmulti, ifc, tdad);
+	if(waserror()){
+		remroute(f, a, IPallbits, v6Unspecified, IPallbits, ip, Rmulti, ifc, tdad);
+		nexterror();
+	}
 	icmpns(f, 0, SRC_UNSPEC, ip, TARG_MULTI, ifc->mac);
-
-	remroute(f, mcast, IPallbits, v6Unspecified, IPallbits, ip, Rmulti, ifc, tdad);
+	poperror();
+	remroute(f, a, IPallbits, v6Unspecified, IPallbits, ip, Rmulti, ifc, tdad);
 }

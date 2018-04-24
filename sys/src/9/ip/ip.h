@@ -243,7 +243,7 @@ struct Medium
 	void	(*pktin)(Fs *f, Ipifc *ifc, Block *bp);
 
 	/* address resolution */
-	void	(*areg)(Fs *f, Ipifc *ifc, uchar *ip, uchar *proxy);			/* register */
+	void	(*areg)(Fs *f, Ipifc *ifc, Iplifc *lifc, uchar *ip);
 
 	/* v6 address generation */
 	void	(*pref2addr)(uchar *pref, uchar *ea);
@@ -258,7 +258,7 @@ struct Iplifc
 	uchar	mask[IPaddrlen];
 	uchar	remote[IPaddrlen];
 	uchar	net[IPaddrlen];
-	uchar	type;		/* ruoute type */
+	uchar	type;		/* route type */
 	uchar	tentative;	/* =1 => v6 dup disc on, =0 => confirmed unique */
 	uchar	onlink;		/* =1 => onlink, =0 offlink. */
 	uchar	autoflag;	/* v6 autonomous flag */
@@ -310,14 +310,11 @@ struct Ipifc
 	int	maxtu;		/* Maximum transfer unit */
 	int	mintu;		/* Minumum tranfer unit */
 	void	*arg;		/* medium specific */
-	int	reassemble;	/* reassemble IP packets before forwarding */
 
-	/* these are used so that we can unbind on the fly */
-	Lock	idlock;
+	uchar	reflect;	/* allow forwarded packets to go out the same interface */
+	uchar	reassemble;	/* reassemble IP packets before forwarding to this interface */
+	
 	uchar	ifcid;		/* incremented each 'bind/unbind/add/remove' */
-	int	ref;		/* number of proc's using this ipifc */
-	Rendez	wait;		/* where unbinder waits for ref == 0 */
-	int	unbinding;
 
 	uchar	mac[MAClen];	/* MAC address */
 
@@ -592,17 +589,16 @@ struct Arpent
 {
 	uchar	ip[IPaddrlen];
 	uchar	mac[MAClen];
-	Arpent*	hash;
-	Block*	hold;
-	Block*	last;
-	uint	ctime;			/* time entry was created or refreshed */
-	uint	utime;			/* time entry was last used */
-	uchar	state;
+	Arpent	*hash;
 	Arpent	*nextrxt;		/* re-transmit chain */
-	uint	rtime;			/* time for next retransmission */
-	uchar	rxtsrem;
+	Block	*hold;
+	Block	*last;
 	Ipifc	*ifc;
 	uchar	ifcid;			/* must match ifc->id */
+	uchar	state;
+	uchar	rxtsrem;		/* re-tranmissions remaining */
+	ulong	ctime;			/* time entry was created or refreshed */
+	ulong	utime;			/* time entry was last used */
 };
 
 extern void	arpinit(Fs*);
@@ -611,7 +607,7 @@ extern int	arpwrite(Fs*, char*, int);
 extern Arpent*	arpget(Arp*, Block *bp, int version, Ipifc *ifc, uchar *ip, uchar *h);
 extern void	arprelease(Arp*, Arpent *a);
 extern Block*	arpresolve(Arp*, Arpent *a, Medium *type, uchar *mac);
-extern int	arpenter(Fs*, int version, uchar *ip, uchar *mac, int n, uchar *src, int norefresh);
+extern int	arpenter(Fs*, int version, uchar *ip, uchar *mac, int n, uchar *ia, Ipifc *ifc, int refresh);
 extern void	ndpsendsol(Fs*, Ipifc*, Arpent*);
 
 /*
@@ -657,8 +653,6 @@ extern Medium	pktmedium;
 extern Medium*	ipfindmedium(char *name);
 extern void	addipmedium(Medium *med);
 extern int	ipforme(Fs*, uchar *addr);
-extern int	iptentative(Fs*, uchar *addr);
-extern int	ipisbm(uchar *ip);
 extern int	ipismulticast(uchar *ip);
 extern Ipifc*	findipifc(Fs*, uchar *local, uchar *remote, int type);
 extern Ipifc*	findipifcstr(Fs *f, char *s);
@@ -680,7 +674,7 @@ extern char*	ipifcadd6(Ipifc *ifc, char**argv, int argc);
 extern void	iprouting(Fs*, int);
 extern void	icmpnoconv(Fs*, Block*);
 extern void	icmpcantfrag(Fs*, Block*, int);
-extern void	icmpttlexceeded(Fs*, uchar*, Block*);
+extern void	icmpttlexceeded(Fs*, Ipifc*, Block*);
 extern ushort	ipcsum(uchar*);
 extern void	ipiput4(Fs*, Ipifc*, Block*);
 extern void	ipiput6(Fs*, Ipifc*, Block*);

@@ -99,6 +99,7 @@ ip_init(Fs *f)
 	IP *ip;
 
 	ip = smalloc(sizeof(IP));
+	ip->stats[DefaultTTL] = MAXTTL;
 	initfrag(ip, 100);
 	f->ip = ip;
 
@@ -333,8 +334,7 @@ ipiput4(Fs *f, Ipifc *ifc, Block *bp)
 	if((bp->flag & Bipck) == 0 && ipcsum(&h->vihl)) {
 		ip->stats[InHdrErrors]++;
 		netlog(f, Logip, "ip: checksum error %V\n", h->src);
-		freeblist(bp);
-		return;
+		goto drop;
 	}
 	v4tov6(v6dst, h->dst);
 	notforme = ipforme(f, v6dst) == 0;
@@ -345,8 +345,7 @@ ipiput4(Fs *f, Ipifc *ifc, Block *bp)
 		if(hl < (IP_HLEN4<<2)) {
 			ip->stats[InHdrErrors]++;
 			netlog(f, Logip, "ip: %V bad hivl %ux\n", h->src, h->vihl);
-			freeblist(bp);
-			return;
+			goto drop;
 		}
 		/* If this is not routed strip off the options */
 		if(notforme == 0) {
@@ -364,33 +363,30 @@ ipiput4(Fs *f, Ipifc *ifc, Block *bp)
 	if(notforme) {
 		Route *r;
 		Routehint rh;
+		Ipifc *nifc;
 
-		if(!ip->iprouting){
-			freeblist(bp);
-			return;
-		}
+		if(!ip->iprouting)
+			goto drop;
 
 		/* don't forward to source's network */
 		rh.r = nil;
 		r = v4lookup(f, h->dst, h->src, &rh);
-		if(r == nil || r->ifc == ifc){
+		if(r == nil || (nifc = r->ifc) == nil
+		|| (nifc == ifc && !ifc->reflect)){
 			ip->stats[OutDiscards]++;
-			freeblist(bp);
-			return;
+			goto drop;
 		}
 
 		/* don't forward if packet has timed out */
 		hop = h->ttl;
 		if(hop < 1) {
 			ip->stats[InHdrErrors]++;
-			icmpttlexceeded(f, ifc->lifc->local, bp);
-			freeblist(bp);
-			return;
+			icmpttlexceeded(f, ifc, bp);
+			goto drop;
 		}
 
 		/* reassemble if the interface expects it */
-if(r->ifc == nil) panic("nil route ifc");
-		if(r->ifc->reassemble){
+		if(nifc->reassemble){
 			frag = nhgets(h->frag);
 			if(frag & ~IP_DF) {
 				h->tos = 0;
@@ -434,6 +430,7 @@ if(r->ifc == nil) panic("nil route ifc");
 	}
 	ip->stats[InDiscards]++;
 	ip->stats[InUnknownProtos]++;
+drop:
 	freeblist(bp);
 }
 
@@ -445,8 +442,6 @@ ipstats(Fs *f, char *buf, int len)
 	int i;
 
 	ip = f->ip;
-	ip->stats[DefaultTTL] = MAXTTL;
-
 	p = buf;
 	e = p+len;
 	for(i = 0; i < Nipstats; i++)
@@ -471,7 +466,7 @@ ip4reassemble(IP *ip, int offset, Block *bp, Ip4hdr *ih)
 	/*
 	 *  block lists are too hard, pullupblock into a single block
 	 */
-	if(bp->next){
+	if(bp->next != nil){
 		bp = pullupblock(bp, blocklen(bp));
 		ih = (Ip4hdr*)(bp->rp);
 	}
@@ -481,7 +476,7 @@ ip4reassemble(IP *ip, int offset, Block *bp, Ip4hdr *ih)
 	/*
 	 *  find a reassembly queue for this fragment
 	 */
-	for(f = ip->flisthead4; f; f = fnext){
+	for(f = ip->flisthead4; f != nil; f = fnext){
 		fnext = f->next;	/* because ipfragfree4 changes the list */
 		if(f->src == src && f->dst == dst && f->id == id)
 			break;
@@ -540,7 +535,7 @@ ip4reassemble(IP *ip, int offset, Block *bp, Ip4hdr *ih)
 	}
 
 	/* Check overlap of a previous fragment - trim away as necessary */
-	if(prev) {
+	if(prev != nil) {
 		ovlap = BKFG(prev)->foff + BKFG(prev)->flen - BKFG(bp)->foff;
 		if(ovlap > 0) {
 			if(ovlap >= BKFG(bp)->flen) {
@@ -557,11 +552,11 @@ ip4reassemble(IP *ip, int offset, Block *bp, Ip4hdr *ih)
 	*l = bp;
 
 	/* Check to see if succeeding segments overlap */
-	if(bp->next) {
+	if(bp->next != nil) {
 		l = &bp->next;
 		fend = BKFG(bp)->foff + BKFG(bp)->flen;
 		/* Take completely covered segments out */
-		while(*l) {
+		while(*l != nil) {
 			ovlap = fend - BKFG(*l)->foff;
 			if(ovlap <= 0)
 				break;
@@ -585,7 +580,7 @@ ip4reassemble(IP *ip, int offset, Block *bp, Ip4hdr *ih)
 	 *  without IP_MF set, we're done.
 	 */
 	pktposn = 0;
-	for(bl = f->blist; bl; bl = bl->next) {
+	for(bl = f->blist; bl != nil; bl = bl->next) {
 		if(BKFG(bl)->foff != pktposn)
 			break;
 		if((BLKIP(bl)->frag[0]&(IP_MF>>8)) == 0) {
@@ -596,7 +591,7 @@ ip4reassemble(IP *ip, int offset, Block *bp, Ip4hdr *ih)
 			/* Pullup all the fragment headers and
 			 * return a complete packet
 			 */
-			for(bl = bl->next; bl; bl = bl->next) {
+			for(bl = bl->next; bl != nil; bl = bl->next) {
 				fragsize = BKFG(bl)->flen;
 				len += fragsize;
 				bl->rp += IP4HDR;
@@ -626,7 +621,7 @@ ipfragfree4(IP *ip, Fragment4 *frag)
 {
 	Fragment4 *fl, **l;
 
-	if(frag->blist)
+	if(frag->blist != nil)
 		freeblist(frag->blist);
 
 	frag->src = 0;
@@ -634,7 +629,7 @@ ipfragfree4(IP *ip, Fragment4 *frag)
 	frag->blist = nil;
 
 	l = &ip->flisthead4;
-	for(fl = *l; fl; fl = fl->next) {
+	for(fl = *l; fl != nil; fl = fl->next) {
 		if(fl == frag) {
 			*l = frag->next;
 			break;
@@ -657,7 +652,7 @@ ipfragallo4(IP *ip)
 
 	while(ip->fragfree4 == nil) {
 		/* free last entry on fraglist */
-		for(f = ip->flisthead4; f->next; f = f->next)
+		for(f = ip->flisthead4; f->next != nil; f = f->next)
 			;
 		ipfragfree4(ip, f);
 	}
