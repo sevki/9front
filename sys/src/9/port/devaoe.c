@@ -1728,7 +1728,7 @@ newunit(void)
 {
 	int x;
 
-	x = incref(&units);
+	x = incref(&units)-1;
 	if(x >= Maxunits){
 		decref(&units);
 		x = -1;
