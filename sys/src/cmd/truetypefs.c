@@ -9,6 +9,8 @@
 static char Egreg[] = "my memory of truetype is fading";
 static char Enoent[] = "not found";
 
+static char *fontpath = "/lib/font/ttf";
+
 enum { MAXSUB = 0x100 };
 
 typedef struct TFont TFont;
@@ -97,15 +99,15 @@ mksubfonts(TFont *f)
 	for(c = u->cmap; c < u->cmap + u->ncmap; c++){
 		for(k = c->start; k < c->end; k += MAXSUB){
 			s = emalloc(sizeof(TSubfont));
-			s->start = c->start;
-			if(c->start == 0) got0 = 1;
+			s->start = k;
+			if(k == 0) got0 = 1;
 			s->end = k + MAXSUB - 1;
 			if(s->end > c->end)
 				s->end = c->end;
 			s->font = f;
 			s->qid = (Qid){qidgen(), 0, 0};
-			s->next = f->sub[c->start >> 8 & 0xff];
-			f->sub[c->start >> 8 & 0xff] = s;
+			s->next = f->sub[k >> 8 & 0xff];
+			f->sub[k >> 8 & 0xff] = s;
 			fmtprint(&fmt, "%#.4ux\t%#.4ux\ts.%.4ux-%.4ux\n", s->start, s->end, s->start, s->end);
 		}
 	}
@@ -184,7 +186,10 @@ compilesub(TFont *f, TSubfont *s)
 		*p++ = 0;
 		*p++ = h;
 		*p++ = gs[i]->xminpx;
-		*p++ = gs[i]->advanceWidthpx;
+		if(gs[i]->advanceWidthpx != 0)
+			*p++ = gs[i]->advanceWidthpx;
+		else
+			*p++ = gs[i]->width;
 		x += gs[i]->width;
 	}
 	*p++ = x;
@@ -219,7 +224,11 @@ tryfont(char *name)
 		goto inval;
 	buf = estrdup9p(name);
 	buf[d - name] = 0;
-	ttf = ttfopen(buf, sz, 0);
+	p = smprint("%s/%s", fontpath, buf);
+	if(p == nil)
+		sysfatal("smprint: %r");
+	ttf = ttfopen(p, sz, 0);
+	free(p);
 	if(ttf == nil){
 		free(buf);
 		return nil;
@@ -420,12 +429,22 @@ Srv fssrv = {
 	.destroyfid = fsdestroyfid,
 };
 
+static void
+usage(void)
+{
+	fprint(2, "usage: %s [-F fontpath]\n", argv0);
+	exits("usage");
+}
+
 void
 main(int argc, char **argv)
 {
 	ARGBEGIN {
+	case 'F':
+		fontpath = EARGF(usage());
+		break;
 	default:
-		sysfatal("usage");
+		usage();
 	} ARGEND;
 	
 	unmount(nil, "/n/ttf");
